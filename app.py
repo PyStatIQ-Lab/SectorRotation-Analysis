@@ -4,50 +4,74 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 from io import BytesIO
+import pytz
 
-# Configure Streamlit page
-st.set_page_config(page_title="Sector Analysis Dashboard", layout="wide", page_icon="📊")
+# -------------------- Configuration --------------------
+IST = pytz.timezone('Asia/Kolkata')
+CACHE_EXPIRY_HOUR = 17  # 5:00 PM
+CACHE_EXPIRY_MINUTE = 0
 
-# -------------------- Sidebar Configuration --------------------
-st.sidebar.title("Configuration")
-
-# Date range selection
-end_date = st.sidebar.date_input("End Date", datetime.today())
-start_date = st.sidebar.date_input("Start Date", end_date - timedelta(days=365))
-
-# Sector selection
-sector_symbols = {
-    "Financials": "^NSEBANK",
-    "IT": "^CNXIT",
-    "Auto": "^CNXAUTO",
-    "FMCG": "^CNXFMCG",
-    "Pharma": "^CNXPHARMA",
-    "Metal": "^CNXMETAL",
-    "Energy": "^CNXENERGY",
-    "Infra": "^CNXINFRA",
-    "Realty": "^CNXREALTY",
-    "Media": "^CNXMEDIA"
-}
-selected_sectors = st.sidebar.multiselect(
-    "Select Sectors",
-    list(sector_symbols.keys()),
-    default=list(sector_symbols.keys())
-)
-
-# -------------------- Data Loading --------------------
-@st.cache_data
-def load_data(sectors, start_date, end_date):
+# -------------------- Data Loading with Time-Based Caching --------------------
+@st.cache_data(ttl=24*60*60)  # Cache for 24 hours
+def load_data_with_cache(sectors, start_date, end_date):
+    """Load data with caching that respects the 5:00 PM IST refresh"""
+    now = datetime.now(IST)
+    
+    # Check if we should use cached data or fetch fresh
+    if now.hour < CACHE_EXPIRY_HOUR or (now.hour == CACHE_EXPIRY_HOUR and now.minute < CACHE_EXPIRY_MINUTE):
+        # Use cached data until 5:00 PM IST
+        st.warning(f"Using cached data. Fresh data will be fetched after 5:00 PM IST.")
+        return None
+    
+    # After 5:00 PM IST, fetch fresh data
     symbols = [sector_symbols[s] for s in sectors]
-    data = yf.download(symbols, start=start_date, end=end_date)["Close"]
-    data.columns = sectors  # Use friendly names
-    return data
+    try:
+        data = yf.download(symbols, start=start_date, end=end_date)["Close"]
+        data.columns = sectors
+        st.success("Successfully fetched fresh market data!")
+        return data
+    except Exception as e:
+        st.error(f"Error fetching data: {str(e)}")
+        return None
 
-with st.spinner("Loading market data..."):
-    data = load_data(selected_sectors, start_date, end_date)
+# -------------------- Main Application --------------------
+def main():
+    # Configure Streamlit page
+    st.set_page_config(page_title="Sector Analysis Dashboard", layout="wide", page_icon="📊")
+
+    # Sidebar Configuration
+    st.sidebar.title("Configuration")
+    
+    # Date range selection (default to current day at 5:00 PM IST)
+    now_ist = datetime.now(IST)
+    end_date = st.sidebar.date_input("End Date", now_ist)
+    start_date = st.sidebar.date_input("Start Date", end_date - timedelta(days=365))
+    
+    # Convert to timezone-aware datetime
+    start_date = IST.localize(datetime.combine(start_date, datetime.min.time()))
+    end_date = IST.localize(datetime.combine(end_date, datetime.min.time()))
+    
+    # Sector selection
+    selected_sectors = st.sidebar.multiselect(
+        "Select Sectors",
+        list(sector_symbols.keys()),
+        default=list(sector_symbols.keys())
+    )
+    
+    # Load data with caching logic
+    with st.spinner("Checking for fresh data..."):
+        data = load_data_with_cache(selected_sectors, start_date, end_date)
+        
+        if data is None:
+            # If before 5:00 PM or error, try to load from cache
+            data = load_data_with_cache(selected_sectors, start_date, end_date)
+            if data is None:
+                st.error("No data available. Please try again after 5:00 PM IST.")
+                return
 
 # -------------------- Analysis Functions --------------------
 def calculate_returns(data):
