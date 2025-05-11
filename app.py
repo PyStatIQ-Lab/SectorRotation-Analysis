@@ -9,8 +9,6 @@ from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 from io import BytesIO
 import pytz
-import time
-import hashlib
 import os
 from pathlib import Path
 
@@ -43,11 +41,6 @@ def should_fetch_fresh_data():
     now = datetime.now(IST)
     return now.hour >= CACHE_EXPIRY_HOUR
 
-def get_data_cache_key(sectors, start_date, end_date):
-    """Generate a unique cache key for the data request"""
-    key_str = f"{'-'.join(sorted(sectors))}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}"
-    return hashlib.md5(key_str.encode()).hexdigest()
-
 def load_cached_data():
     """Load cached data if available and valid"""
     if CACHE_FILE.exists():
@@ -67,10 +60,14 @@ def save_data_to_cache(data):
     except:
         return False
 
-def fetch_fresh_data(sectors, start_date, end_date):
+def fetch_fresh_data(sectors):
     """Fetch fresh data from Yahoo Finance"""
     symbols = [sector_symbols[s] for s in sectors]
     try:
+        # Always fetch 1 year of data ending at today's date
+        end_date = datetime.now(IST)
+        start_date = end_date - timedelta(days=365)
+        
         data = yf.download(symbols, start=start_date, end=end_date)["Close"]
         data.columns = sectors  # Use friendly names
         save_data_to_cache(data)
@@ -79,7 +76,7 @@ def fetch_fresh_data(sectors, start_date, end_date):
         st.error(f"Error fetching data: {str(e)}")
         return None
 
-def load_data(sectors, start_date, end_date):
+def load_data(sectors):
     """Main data loading function with caching logic"""
     # First try to load cached data
     cached_data = load_cached_data()
@@ -90,7 +87,7 @@ def load_data(sectors, start_date, end_date):
     
     # If we need fresh data or cache is invalid
     with st.spinner("Fetching fresh market data..."):
-        fresh_data = fetch_fresh_data(sectors, start_date, end_date)
+        fresh_data = fetch_fresh_data(sectors)
         if fresh_data is not None:
             return fresh_data
         
@@ -162,7 +159,15 @@ def volatility_analysis(df):
         'Max Drawdown': (1 - df.div(df.cummax())).max()
     })
 
-def capm_analysis(sector_returns, market_returns='^NSEI', risk_free=0.05):
+def capm_analysis(sector_returns):
+    """Modified CAPM analysis with fixed dates"""
+    market_returns = '^NSEI'
+    risk_free = 0.05
+    
+    # Use same date range as sector data (last 1 year)
+    end_date = datetime.now(IST)
+    start_date = end_date - timedelta(days=365)
+    
     market_data = yf.download(market_returns, start=start_date, end=end_date)['Close']
     market_returns = market_data.pct_change().dropna()
     
@@ -217,26 +222,15 @@ def main():
     # Configure Streamlit page
     st.set_page_config(page_title="Sector Analysis Dashboard", layout="wide", page_icon="📊")
     
-    # Sidebar Configuration
-    st.sidebar.title("Configuration")
-    
-    # Date range selection
-    end_date = st.sidebar.date_input("End Date", datetime.now(IST))
-    start_date = st.sidebar.date_input("Start Date", end_date - timedelta(days=365))
-    
-    # Convert to datetime
-    start_date = datetime.combine(start_date, datetime.min.time())
-    end_date = datetime.combine(end_date, datetime.min.time())
-    
-    # Sector selection
+    # Sector selection only (no date selection)
     selected_sectors = st.sidebar.multiselect(
         "Select Sectors",
         list(sector_symbols.keys()),
         default=list(sector_symbols.keys())
     )
     
-    # Load data
-    data = load_data(selected_sectors, start_date, end_date)
+    # Load data (automatically handles 5PM IST refresh)
+    data = load_data(selected_sectors)
     if data is None:
         st.stop()
     
@@ -283,19 +277,21 @@ def main():
     
     # Dashboard Layout
     st.title("Sector Analysis Dashboard")
-    st.markdown(f"""
-    **Last Data Fetch:** {datetime.fromtimestamp(CACHE_FILE.stat().st_mtime).astimezone(IST).strftime('%Y-%m-%d %H:%M %Z')}  
-    Next refresh after 5:00 PM IST
-    """)
+    
+    # Show last update time
+    if CACHE_FILE.exists():
+        last_update = datetime.fromtimestamp(CACHE_FILE.stat().st_mtime).astimezone(IST)
+        st.markdown(f"""
+        **Last Data Fetch:** {last_update.strftime('%Y-%m-%d %H:%M %Z')}  
+        Next refresh after 5:00 PM IST
+        """)
     
     # Summary Metrics
     st.header("📊 Performance Summary")
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
         st.metric("Sectors Analyzed", len(selected_sectors))
     with col2:
-        st.metric("Time Period", f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
-    with col3:
         st.metric("Latest Data", data.index[-1].strftime('%Y-%m-%d'))
     
     # Main tabs
