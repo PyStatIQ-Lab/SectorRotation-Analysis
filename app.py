@@ -7,7 +7,7 @@ import seaborn as sns
 from datetime import datetime, timedelta
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_squared_error
+from io import BytesIO
 
 # Configure Streamlit page
 st.set_page_config(page_title="Sector Analysis Dashboard", layout="wide", page_icon="📊")
@@ -65,9 +65,9 @@ def classify_sectors(df):
         sorted_sectors = df[col].sort_values(ascending=False)
         n = len(sorted_sectors)
         classification = pd.Series(index=sorted_sectors.index, dtype="object")
-        classification[sorted_sectors.index[:n // 2]] = "Overweight"
-        classification[sorted_sectors.index[n // 2:-n // 4]] = "Neutral"
-        classification[sorted_sectors.index[-n // 4:]] = "Underweight"
+        classification[sorted_sectors.index[:n // 3]] = "Overweight"
+        classification[sorted_sectors.index[n // 3:(n * 2) // 3]] = "Neutral"
+        classification[sorted_sectors.index[(n * 2) // 3:]] = "Underweight"
         result[col] = classification
     return pd.DataFrame(result)
 
@@ -143,7 +143,7 @@ def predict_returns(series, forecast_days=5):
     y_train, y_test = y[:split], y[split:]
     
     lr = LinearRegression().fit(X_train, y_train)
-    rf = RandomForestRegressor(n_estimators=100).fit(X_train, y_train)
+    rf = RandomForestRegressor(n_estimators=100, random_state=42).fit(X_train, y_train)
     
     last_features = np.array([returns.iloc[-1], returns.iloc[-2], returns.iloc[-3]]).reshape(1, -1)
     
@@ -155,9 +155,9 @@ def predict_returns(series, forecast_days=5):
 def sector_rotation_model(returns, volatility):
     scores = pd.DataFrame(index=returns.index)
     scores['Momentum'] = returns['3M'].rank(ascending=False)
-    scores['Volatility'] = volatility['Annualized Volatility'].rank()
+    scores['Volatility'] = volatility['Annualized Volatility'].rank(ascending=True)  # Lower volatility is better
     scores['Composite'] = scores['Momentum'] * 0.7 + scores['Volatility'] * 0.3
-    return scores.sort_values('Composite', ascending=True)
+    return scores.sort_values('Composite', ascending=False)
 
 # -------------------- Perform Analysis --------------------
 with st.spinner("Performing analysis..."):
@@ -166,7 +166,7 @@ with st.spinner("Performing analysis..."):
     sector_classification = classify_sectors(returns)
     rsi = data.apply(compute_rsi)
     rsi_latest = rsi.iloc[-1]
-    momentum_scores = (returns["3M"] + rsi_latest) / 2
+    momentum_scores = (returns["3M"] * 0.7 + rsi_latest * 0.3)  # Weighted average
     correlation_matrix = data.pct_change().corr()
     
     # Technical indicators
@@ -234,13 +234,14 @@ with tab1:
     ax.set_title("Sector Correlation Matrix")
     st.pyplot(fig)
     
-    st.subheader("Momentum Scores")
-    st.dataframe(pd.DataFrame({
+    st.subheader("Momentum Analysis")
+    momentum_df = pd.DataFrame({
         '3M Returns (%)': returns['3M'],
         'RSI': rsi_latest,
         'Momentum Score': momentum_scores,
         'Rating': sector_classification['3M']
-    }).style.background_gradient(cmap='RdYlGn', axis=0))
+    })
+    st.dataframe(momentum_df.style.background_gradient(cmap='RdYlGn', axis=0))
 
 with tab2:
     st.subheader("Technical Indicators")
@@ -249,7 +250,7 @@ with tab2:
     with col1:
         st.markdown("**Bollinger Bands Signals**")
         st.dataframe(pd.DataFrame({
-            'Price': data.iloc[-1],
+            'Price': data.iloc[-1].round(2),
             'Signal': bb_signals
         }).style.applymap(lambda x: 'background-color: #ffcccc' if x == 'Overbought' else 
                          ('background-color: #ccffcc' if x == 'Oversold' else ''), subset=['Signal']))
@@ -262,24 +263,27 @@ with tab2:
                          ('background-color: #ffcccc' if 'Bearish' in str(x) else '')))
     
     st.subheader("Risk Analysis")
-    st.dataframe(pd.DataFrame({
-        'Annualized Volatility': volatility['Annualized Volatility'],
-        'Max Drawdown': volatility['Max Drawdown'],
+    risk_df = pd.DataFrame({
+        'Annualized Volatility (%)': volatility['Annualized Volatility'] * 100,
+        'Max Drawdown (%)': volatility['Max Drawdown'] * 100,
         'Beta': capm_results['Beta'],
         'Alpha': capm_results['Alpha']
-    }).style.background_gradient(cmap='YlOrRd', subset=['Annualized Volatility', 'Max Drawdown']))
+    })
+    st.dataframe(risk_df.style.background_gradient(cmap='YlOrRd', subset=['Annualized Volatility (%)', 'Max Drawdown (%)']))
 
 with tab3:
     st.subheader("Machine Learning Forecasts")
     
     forecast_df = pd.DataFrame({
-        'Linear Regression (5D)': [ml_predictions[s]['Linear Regression'] for s in data.columns],
-        'Random Forest (5D)': [ml_predictions[s]['Random Forest'] for s in data.columns]
+        'Linear Regression (5D %)': [ml_predictions[s]['Linear Regression'] for s in data.columns],
+        'Random Forest (5D %)': [ml_predictions[s]['Random Forest'] for s in data.columns]
     })
     st.dataframe(forecast_df.style.background_gradient(cmap='RdYlGn', axis=0))
     
     st.subheader("Sector Rotation Model")
-    st.dataframe(rotation_recommendations.style.background_gradient(cmap='RdYlGn', subset=['Composite']))
+    rotation_df = rotation_recommendations.copy()
+    rotation_df['Rank'] = range(1, len(rotation_df) + 1)
+    st.dataframe(rotation_df.style.background_gradient(cmap='RdYlGn', subset=['Composite']))
     
     st.markdown("""
     **Rotation Strategy Guide:**
@@ -296,19 +300,33 @@ with tab4:
         '3M Return (%)': returns['3M'],
         '6M Return (%)': returns['6M'],
         '1Y Return (%)': returns['1Y'],
-        'RSI': rsi_latest,
-        'Momentum Score': momentum_scores,
+        'RSI': rsi_latest.round(1),
+        'Momentum Score': momentum_scores.round(1),
         'Rating': sector_classification['3M'],
         'Bollinger Signal': bb_signals,
         'MACD Signal': macd_signals,
-        'Volatility (%)': volatility['Annualized Volatility'] * 100,
-        'Max Drawdown (%)': volatility['Max Drawdown'] * 100,
-        'Beta': capm_results['Beta'],
-        'Alpha': capm_results['Alpha'],
-        'LR 5D Forecast (%)': [ml_predictions[s]['Linear Regression'] for s in data.columns],
-        'RF 5D Forecast (%)': [ml_predictions[s]['Random Forest'] for s in data.columns],
-        'Rotation Rank': rotation_recommendations['Composite'].rank()
+        'Volatility (%)': (volatility['Annualized Volatility'] * 100).round(1),
+        'Max Drawdown (%)': (volatility['Max Drawdown'] * 100).round(1),
+        'Beta': capm_results['Beta'].round(2),
+        'Alpha': capm_results['Alpha'].round(4),
+        'LR 5D Forecast (%)': [round(ml_predictions[s]['Linear Regression'], 1) for s in data.columns],
+        'RF 5D Forecast (%)': [round(ml_predictions[s]['Random Forest'], 1) for s in data.columns],
+        'Rotation Rank': rotation_recommendations['Composite'].rank().astype(int)
     })
+    
+    # Generate recommendations
+    def get_recommendation(row):
+        pct_rank = (final_output['Momentum Score'].rank(pct=True).loc[row.name])
+        if pct_rank >= 0.75:
+            return '🌟 Strong Buy'
+        elif pct_rank >= 0.5:
+            return '➖ Neutral'
+        elif pct_rank >= 0.25:
+            return '⚠️ Underweight'
+        else:
+            return '❌ Avoid'
+    
+    final_output['Recommendation'] = final_output.apply(get_recommendation, axis=1)
     
     st.dataframe(final_output.style
                 .background_gradient(cmap='RdYlGn', subset=['3M Return (%)', 'Momentum Score'])
@@ -316,23 +334,9 @@ with tab4:
                 .applymap(lambda x: 'background-color: #ffcccc' if x == 'Overbought' else 
                          ('background-color: #ccffcc' if x == 'Oversold' else ''), subset=['Bollinger Signal'])
                 .applymap(lambda x: 'background-color: #ccffcc' if 'Bullish' in str(x) else 
-                         ('background-color: #ffcccc' if 'Bearish' in str(x) else ''), subset=['MACD Signal']))
-    
-    # Generate recommendations
-    conditions = [
-        (final_output['Momentum Score'].rank(pct=True) >= 0.75),
-        (final_output['Momentum Score'].rank(pct=True) >= 0.5),
-        (final_output['Momentum Score'].rank(pct=True) >= 0.25),
-        (final_output['Momentum Score'].rank(pct=True) < 0.25)
-    ]
-    choices = ['🌟 Strong Buy', '➖ Neutral', '⚠️ Underweight', '❌ Avoid']
-    final_output['Recommendation'] = np.select(conditions, choices)
-    
-    st.subheader("Investment Recommendations")
-    st.dataframe(final_output[['Rating', 'Recommendation']].style.applymap(
-        lambda x: 'background-color: #e6ffe6' if 'Strong Buy' in x else 
-        ('background-color: #ffe6e6' if 'Avoid' in x else ''),
-        subset=['Recommendation']))
+                         ('background-color: #ffcccc' if 'Bearish' in str(x) else ''), subset=['MACD Signal'])
+                .applymap(lambda x: 'background-color: #e6ffe6' if '🌟' in str(x) else 
+                         ('background-color: #ffe6e6' if '❌' in str(x) else ''), subset=['Recommendation']))
 
 # -------------------- Download Report --------------------
 st.sidebar.markdown("---")
@@ -361,14 +365,14 @@ if st.sidebar.button("📥 Download Full Report"):
             sns.heatmap(returns, annot=True, cmap="RdYlGn", center=0, fmt=".1f", ax=ax1)
             ax1.set_title("Sector Returns (%)")
             img1 = BytesIO()
-            fig1.savefig(img1, format='png')
+            fig1.savefig(img1, format='png', bbox_inches='tight', dpi=300)
             plt.close(fig1)
             
             fig2, ax2 = plt.subplots(figsize=(10, 8))
             sns.heatmap(correlation_matrix, cmap="coolwarm", annot=True, fmt=".2f", ax=ax2)
             ax2.set_title("Sector Correlation Matrix")
             img2 = BytesIO()
-            fig2.savefig(img2, format='png')
+            fig2.savefig(img2, format='png', bbox_inches='tight', dpi=300)
             plt.close(fig2)
             
             # Insert images
@@ -401,15 +405,19 @@ if selected_chart:
     bb['Lower Band'].plot(ax=ax1, label='Lower Band', color='red', linestyle='--')
     ax1.set_title(f"{selected_chart} Price with Bollinger Bands")
     ax1.legend()
+    ax1.grid(True)
     
     # MACD
     macd = compute_macd(prices)
     macd['MACD'].plot(ax=ax2, label='MACD', color='blue')
     macd['Signal'].plot(ax=ax2, label='Signal', color='orange')
-    ax2.bar(macd.index, macd['Histogram'], label='Histogram', color=np.where(macd['Histogram'] > 0, 'g', 'r'))
+    ax2.bar(macd.index, macd['Histogram'], 
+            color=np.where(macd['Histogram'] > 0, 'green', 'red'),
+            width=0.8, label='Histogram')
     ax2.axhline(0, color='gray', linestyle='--')
     ax2.set_title("MACD Indicator")
     ax2.legend()
+    ax2.grid(True)
     
     plt.tight_layout()
     st.pyplot(fig)
